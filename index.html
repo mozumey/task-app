@@ -972,7 +972,7 @@ function DailyReportView({ tasks, fixedTasks, properties, reflections, onSaveRef
   const copy = () => { navigator.clipboard.writeText(report).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }); };
 
   const startReflection = async () => {
-    const key = (sessionStorage.getItem('taskapp_anthropic_key') || '').trim().replace(/[^\x20-\x7E]/g, '');
+    const key = (localStorage.getItem('taskapp_anthropic_key') || '').trim().replace(/[^\x20-\x7E]/g, '');
     if (!key) { setError('APIキーが未設定です。週次タブで設定してください。'); return; }
     setLoading(true); setError('');
     const completedToday = tasks.filter(t => t.isComplete && t.completedAt && toDateKey(t.completedAt) === today && t.priority !== 'light');
@@ -1053,7 +1053,7 @@ function WeeklyReportView({ tasks, fixedTasks, reflections }) {
   const [copied, setCopied] = useState(false);
 
   const generate = async () => {
-    const key = (apiKey || sessionStorage.getItem('taskapp_anthropic_key') || '').trim().replace(/[^\x20-\x7E]/g, '');
+    const key = (apiKey || localStorage.getItem('taskapp_anthropic_key') || '').trim().replace(/[^\x20-\x7E]/g, '');
     if (!key) { setShowKeyInput(true); return; }
     setLoading(true); setError('');
     const weekStart = new Date();
@@ -1082,7 +1082,7 @@ function WeeklyReportView({ tasks, fixedTasks, reflections }) {
     } catch (e) { setError('エラー: ' + e.message); }
     finally { setLoading(false); }
   };
-  const saveKey = () => { sessionStorage.setItem('taskapp_anthropic_key', apiKey); setShowKeyInput(false); generate(); };
+  const saveKey = () => { localStorage.setItem('taskapp_anthropic_key', apiKey); setShowKeyInput(false); generate(); };
   const copy = () => { navigator.clipboard.writeText(report).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }); };
 
   return html`
@@ -1097,7 +1097,7 @@ function WeeklyReportView({ tasks, fixedTasks, reflections }) {
       </div>
       ${showKeyInput ? html`
         <div style=${{ ...S.card, marginBottom: 12, backgroundColor: C.bgSub }}>
-          <div style=${{ fontSize: 12, color: C.textMuted, marginBottom: 6 }}>Anthropic APIキーを入力してください（タブを閉じると消去されます）</div>
+          <div style=${{ fontSize: 12, color: C.textMuted, marginBottom: 6 }}>Anthropic APIキーを入力してください</div>
           <div style=${{ display: 'flex', gap: 6 }}>
             <input type="password" value=${apiKey} onChange=${e => setApiKey(e.target.value)} style=${{ ...S.input, flex: 1 }} placeholder="sk-ant-..." />
             <button onClick=${saveKey} style=${S.btnSmall}>保存して生成</button>
