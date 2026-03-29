@@ -1,0 +1,5 @@
+.DS_Store
+tasks/
+.claude/
+serve.py
+業務タスク概要.md

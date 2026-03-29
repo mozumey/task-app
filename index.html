@@ -1,0 +1,1450 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>業務タスク管理</title>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/htm/dist/htm.umd.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', sans-serif; background: #F7F7F5; color: #37352F; font-size: 14px; }
+    button { cursor: pointer; font-family: inherit; font-size: 13px; }
+    button:hover { filter: brightness(0.96); }
+    textarea, input, select { font-family: inherit; font-size: 13px; }
+    input::placeholder, textarea::placeholder { color: #ACABA9; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const html = htm.bind(React.createElement);
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+// Notionライクなカラーパレット
+const C = {
+  bg: '#FFFFFF',
+  bgPage: '#F7F7F5',
+  bgSub: '#F1F1EF',
+  bgActive: '#E9E9E7',
+  bgHighlight: '#F9F9F8',
+  border: '#E9E9E7',
+  borderDark: '#D3D2CF',
+  borderBlack: '#37352F',
+  text: '#37352F',
+  textMuted: '#787774',
+  textLight: '#ACABA9',
+  // 優先度カラー
+  highBg: '#FFE2DD', highText: '#C4362A',
+  medBg: '#FFF3DB',  medText: '#C97D00',
+};
+const S = {
+  btn: (active) => ({
+    border: `1px solid ${active ? C.borderBlack : C.borderDark}`,
+    padding: '5px 14px',
+    backgroundColor: active ? C.text : C.bg,
+    color: active ? '#FFFFFF' : C.text,
+    fontWeight: active ? '600' : 'normal',
+    borderRadius: 6,
+    transition: 'all 0.1s',
+  }),
+  btnSmall: { border: `1px solid ${C.borderDark}`, padding: '3px 9px', backgroundColor: C.bg, borderRadius: 5, fontSize: 12, color: C.text },
+  btnIcon: { border: `1px solid ${C.border}`, padding: '3px 7px', backgroundColor: C.bg, borderRadius: 5, fontSize: 12, lineHeight: 1.4, color: C.textMuted },
+  card: { border: `1px solid ${C.border}`, padding: '10px 12px', marginBottom: 5, backgroundColor: C.bg, borderRadius: 6 },
+  badge: { padding: '2px 7px', fontSize: 11, borderRadius: 4, marginRight: 4, fontWeight: '500' },
+  input: { border: `1px solid ${C.borderDark}`, padding: '6px 9px', borderRadius: 5, width: '100%', backgroundColor: C.bg, color: C.text, outline: 'none' },
+  select: { border: `1px solid ${C.borderDark}`, padding: '6px 9px', borderRadius: 5, backgroundColor: C.bg, color: C.text },
+  textarea: { border: `1px solid ${C.borderDark}`, padding: '8px 9px', borderRadius: 5, width: '100%', resize: 'vertical', backgroundColor: C.bg, color: C.text, outline: 'none' },
+  section: { marginBottom: 22 },
+  sectionTitle: { fontSize: 11, color: C.textLight, borderBottom: `1px solid ${C.border}`, paddingBottom: 5, marginBottom: 10, fontWeight: '600', letterSpacing: '0.08em', textTransform: 'uppercase' },
+  divider: { borderTop: `1px solid ${C.border}`, margin: '12px 0' },
+};
+
+// 優先度バッジスタイルを返すヘルパー
+function priorityBadge(priority) {
+  if (priority === 'high') return { ...S.badge, backgroundColor: C.highBg, color: C.highText };
+  if (priority === 'medium') return { ...S.badge, backgroundColor: C.medBg, color: C.medText };
+  return { ...S.badge, backgroundColor: 'transparent', color: C.textLight };
+}
+
+// ============================================================
+// UTILS
+// ============================================================
+function detectPriority(text) {
+  const t = text.trim();
+  if (t.endsWith('!!') || t.endsWith('！！')) return 'high';
+  if (t.endsWith('!') || t.endsWith('！')) return 'medium';
+  if (/件$/.test(t)) return 'light';
+  return 'low';
+}
+function makeDisplayText(text) { return text.trim().replace(/[!！]{1,2}$/, '').trim(); }
+const PRIORITY_ORDER = { high: 1, medium: 2, low: 3, light: 4 };
+const PRIORITY_LABEL = { high: '高', medium: '中', low: '低', light: '軽' };
+
+function formatDateTime(iso) {
+  const d = new Date(iso);
+  return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+function toDateKey(iso) {
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+function todayKey() { return toDateKey(new Date().toISOString()); }
+function isToday(iso) { return toDateKey(iso) === todayKey(); }
+function dateLabel(iso) { const d = new Date(iso); return `${d.getMonth()+1}月${d.getDate()}日`; }
+function groupByDate(items, getKey) {
+  const groups = {};
+  for (const item of items) {
+    const k = toDateKey(getKey(item));
+    if (!groups[k]) groups[k] = [];
+    groups[k].push(item);
+  }
+  return Object.entries(groups).sort((a, b) => b[0].localeCompare(a[0]));
+}
+
+function generateDailyReportText(tasks, fixedTasks, properties) {
+  const today = todayKey();
+  const propertyMap = Object.fromEntries((properties || []).map(p => [p.id, p]));
+
+  // 固定タスク（今日記録あるもの）
+  const todayFixed = fixedTasks.filter(f =>
+    (f.entries || []).some(e => toDateKey(e.at) === today)
+  );
+
+  // 今日完了した通常タスク（物件なし）
+  const completedNormal = tasks
+    .filter(t => t.isComplete && t.completedAt && toDateKey(t.completedAt) === today && t.priority !== 'light' && !t.propertyId)
+    .sort((a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority]);
+
+  // 今日完了した物件タスク（物件ごとにグループ化）
+  const completedPropertyTasks = tasks
+    .filter(t => t.isComplete && t.completedAt && toDateKey(t.completedAt) === today && t.priority !== 'light' && t.propertyId);
+  const completedByProperty = {};
+  for (const t of completedPropertyTasks) {
+    if (!completedByProperty[t.propertyId]) completedByProperty[t.propertyId] = [];
+    completedByProperty[t.propertyId].push({ task: t, completedSubs: [] });
+  }
+
+  // 未完了だが今日完了したサブタスクを持つ物件タスク
+  const partialPropertyTasks = tasks.filter(t =>
+    !t.isComplete && t.propertyId &&
+    (t.subTasks || []).some(s => s.isComplete && s.completedAt && toDateKey(s.completedAt) === today)
+  );
+  for (const t of partialPropertyTasks) {
+    const subs = (t.subTasks || []).filter(s => s.isComplete && s.completedAt && toDateKey(s.completedAt) === today);
+    if (!completedByProperty[t.propertyId]) completedByProperty[t.propertyId] = [];
+    completedByProperty[t.propertyId].push({ task: t, completedSubs: subs });
+  }
+
+  // 未完了の通常タスク（物件なし）
+  const incompleteNormal = tasks
+    .filter(t => !t.isComplete && t.priority !== 'light' && !t.propertyId)
+    .sort((a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority]);
+
+  // 未完了の物件タスク（物件ごとにグループ化）
+  const incompletePropertyTasks = tasks
+    .filter(t => !t.isComplete && t.priority !== 'light' && t.propertyId);
+  const incompleteByProperty = {};
+  for (const t of incompletePropertyTasks) {
+    if (!incompleteByProperty[t.propertyId]) incompleteByProperty[t.propertyId] = [];
+    incompleteByProperty[t.propertyId].push(t);
+  }
+
+  // 【今日の目標】
+  const lines = ['【今日の目標】'];
+  for (const f of todayFixed) lines.push(`・${f.name}`);
+  for (const t of completedNormal) lines.push(`・${t.displayText}`);
+  for (const [propId, propTasks] of Object.entries(completedByProperty)) {
+    const propName = propertyMap[propId]?.name || '不明な物件';
+    lines.push(`・${propName}`);
+    for (const { task: t, completedSubs } of propTasks) {
+      if (completedSubs.length > 0) {
+        lines.push(`　- ${t.displayText}（${completedSubs.map(s => s.text).join('、')}）`);
+      } else {
+        lines.push(`　- ${t.displayText}`);
+      }
+    }
+  }
+  if (todayFixed.length === 0 && completedNormal.length === 0 && Object.keys(completedByProperty).length === 0) {
+    lines.push('・（なし）');
+  }
+
+  // 【明日の目標】
+  lines.push('', '【明日の目標】');
+  for (const f of fixedTasks) lines.push(`・${f.name}`);
+  for (const t of incompleteNormal) lines.push(`・${t.displayText}`);
+  for (const [propId, propTasks] of Object.entries(incompleteByProperty)) {
+    const propName = propertyMap[propId]?.name || '不明な物件';
+    lines.push(`・${propName}`);
+    for (const t of propTasks) lines.push(`　- ${t.displayText}`);
+  }
+  if (fixedTasks.length === 0 && incompleteNormal.length === 0 && Object.keys(incompleteByProperty).length === 0) {
+    lines.push('・（なし）');
+  }
+
+  return lines.join('\n');
+}
+
+// ============================================================
+// HOOKS
+// ============================================================
+function useLocalStorage(key, initial) {
+  const [state, setState] = useState(() => {
+    try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : initial; }
+    catch { return initial; }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(key, JSON.stringify(state));
+      const now = Date.now().toString();
+      localStorage.setItem('taskapp_v4_ts', now);
+      sessionStorage.setItem('taskapp_v4_ts_own', now); // 自タブの最終書き込み時刻
+    }
+    catch {}
+  }, [key, state]);
+  return [state, setState];
+}
+function useTabConflict() {
+  const [conflict, setConflict] = useState(false);
+  useEffect(() => {
+    const id = setInterval(() => {
+      const stored = Number(localStorage.getItem('taskapp_v4_ts') || 0);
+      const own = Number(sessionStorage.getItem('taskapp_v4_ts_own') || Date.now());
+      if (stored - own > 2000) setConflict(true); // 別タブが自タブより2秒以上新しく書いた
+    }, 3000);
+    return () => clearInterval(id);
+  }, []);
+  return [conflict, () => setConflict(false)];
+}
+
+// ============================================================
+// MODAL BASE
+// ============================================================
+function ModalBase({ onClose, title, children, width = 460 }) {
+  return html`
+    <div
+      style=${{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}
+      onMouseDown=${(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div style=${{ backgroundColor: C.bg, border: `1px solid ${C.borderDark}`, borderRadius: 5, padding: '18px 20px', width, maxWidth: '95vw', maxHeight: '90vh', overflowY: 'auto' }}>
+        <div style=${{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+          <span style=${{ fontWeight: 'bold', fontSize: 14 }}>${title}</span>
+          <button onClick=${onClose} style=${{ ...S.btnIcon, fontSize: 14, padding: '1px 8px' }}>×</button>
+        </div>
+        ${children}
+      </div>
+    </div>
+  `;
+}
+
+// ============================================================
+// COMPLETE MODAL
+// ============================================================
+function CompleteModal({ task, onComplete, onClose }) {
+  const [duration, setDuration] = useState('');
+  const [memo, setMemo] = useState('');
+  const durRef = useRef(null);
+  useEffect(() => { durRef.current && durRef.current.focus(); }, []);
+  const handleKeyDown = (e) => { if (e.shiftKey && e.key === 'Enter') { e.preventDefault(); submit(); } };
+  const submit = () => { onComplete(task.id, duration, memo); onClose(); };
+  return html`
+    <${ModalBase} onClose=${onClose} title=${'完了: ' + task.displayText}>
+      <div style=${{ marginBottom: 10 }}>
+        <label style=${{ fontSize: 12, color: C.textMuted, display: 'block', marginBottom: 3 }}>所要時間（分）</label>
+        <input ref=${durRef} type="number" min="0" value=${duration} onChange=${e => setDuration(e.target.value)} onKeyDown=${handleKeyDown} style=${{ ...S.input, width: 120 }} placeholder="例: 30" />
+      </div>
+      <div style=${{ marginBottom: 14 }}>
+        <label style=${{ fontSize: 12, color: C.textMuted, display: 'block', marginBottom: 3 }}>メモ</label>
+        <textarea value=${memo} onChange=${e => setMemo(e.target.value)} onKeyDown=${handleKeyDown} style=${{ ...S.textarea, height: 72 }} placeholder="作業内容・備考など" />
+      </div>
+      <div style=${{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+        <button onClick=${onClose} style=${S.btn(false)}>キャンセル</button>
+        <button onClick=${submit} style=${{ ...S.btn(true), fontWeight: 'bold' }}>完了！（Shift+Enter）</button>
+      </div>
+    <//>
+  `;
+}
+
+// ============================================================
+// EDIT MODAL（propertyId対応）
+// ============================================================
+function EditModal({ task, properties, onSave, onClose }) {
+  const [text, setText] = useState(task.text);
+  const [subTasks, setSubTasks] = useState(task.subTasks || []);
+  const [propertyId, setPropertyId] = useState(task.propertyId || '');
+  const [newSub, setNewSub] = useState('');
+
+  const addSub = () => {
+    if (!newSub.trim()) return;
+    setSubTasks(prev => [...prev, { id: Date.now().toString(), text: newSub.trim(), isComplete: false }]);
+    setNewSub('');
+  };
+  const removeSub = (id) => setSubTasks(prev => prev.filter(s => s.id !== id));
+  const save = () => { onSave(task.id, text, subTasks, propertyId || null); onClose(); };
+
+  return html`
+    <${ModalBase} onClose=${onClose} title="タスク編集">
+      <div style=${{ marginBottom: 10 }}>
+        <label style=${{ fontSize: 12, color: C.textMuted, display: 'block', marginBottom: 3 }}>タスク名</label>
+        <input value=${text} onChange=${e => setText(e.target.value)} style=${S.input} />
+        <div style=${{ fontSize: 11, color: C.textLight, marginTop: 3 }}>末尾: !! 高 / ! 中 / 〇件 軽 / その他 低</div>
+      </div>
+      <div style=${{ marginBottom: 10 }}>
+        <label style=${{ fontSize: 12, color: C.textMuted, display: 'block', marginBottom: 3 }}>物件への紐づけ</label>
+        <select value=${propertyId} onChange=${e => setPropertyId(e.target.value)} style=${{ ...S.select, width: '100%' }}>
+          <option value="">物件なし（通常タスク）</option>
+          ${properties.map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
+        </select>
+      </div>
+      <div style=${{ marginBottom: 14 }}>
+        <div style=${{ fontSize: 12, color: C.textMuted, marginBottom: 5 }}>サブタスク</div>
+        ${subTasks.map(s => html`
+          <div key=${s.id} style=${{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+            <span style=${{ flex: 1, fontSize: 13 }}>${s.text}</span>
+            <button onClick=${() => removeSub(s.id)} style=${S.btnIcon}>×</button>
+          </div>
+        `)}
+        <div style=${{ display: 'flex', gap: 6, marginTop: 6 }}>
+          <input value=${newSub} onChange=${e => setNewSub(e.target.value)}
+            onKeyDown=${e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) addSub(); }}
+            style=${{ ...S.input, flex: 1 }} placeholder="サブタスクを追加" />
+          <button onClick=${addSub} style=${S.btnSmall}>追加</button>
+        </div>
+      </div>
+      <div style=${{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+        <button onClick=${onClose} style=${S.btn(false)}>キャンセル</button>
+        <button onClick=${save} style=${S.btn(true)}>保存</button>
+      </div>
+    <//>
+  `;
+}
+
+// ============================================================
+// FIXED ENTRY MODAL
+// ============================================================
+function FixedEntryModal({ fixedTask, onAdd, onClose }) {
+  const [duration, setDuration] = useState('');
+  const durRef = useRef(null);
+  useEffect(() => { durRef.current && durRef.current.focus(); }, []);
+  const handleKeyDown = (e) => { if (e.shiftKey && e.key === 'Enter') { e.preventDefault(); submit(); } };
+  const submit = () => { if (!duration) return; onAdd(fixedTask.id, duration); onClose(); };
+  return html`
+    <${ModalBase} onClose=${onClose} title=${'時間追加: ' + fixedTask.name}>
+      <div style=${{ marginBottom: 14 }}>
+        <label style=${{ fontSize: 12, color: C.textMuted, display: 'block', marginBottom: 3 }}>所要時間（分）*</label>
+        <input ref=${durRef} type="number" min="1" value=${duration} onChange=${e => setDuration(e.target.value)} onKeyDown=${handleKeyDown} style=${{ ...S.input, width: 120 }} placeholder="例: 30" />
+      </div>
+      <div style=${{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+        <button onClick=${onClose} style=${S.btn(false)}>キャンセル</button>
+        <button onClick=${submit} style=${S.btn(true)}>記録（Shift+Enter）</button>
+      </div>
+    <//>
+  `;
+}
+
+// ============================================================
+// FIXED TASK NAME MODAL（固定タスクの追加・名前編集）
+// ============================================================
+function FixedTaskNameModal({ task, onSave, onClose }) {
+  const [name, setName] = useState(task ? task.name : '');
+  const inputRef = useRef(null);
+  useEffect(() => { inputRef.current && inputRef.current.focus(); }, []);
+  const save = () => { if (!name.trim()) return; onSave(name.trim()); onClose(); };
+  return html`
+    <${ModalBase} onClose=${onClose} title=${task ? '固定タスクを編集' : '固定タスクを追加'}>
+      <div style=${{ marginBottom: 14 }}>
+        <label style=${{ fontSize: 12, color: C.textMuted, display: 'block', marginBottom: 3 }}>タスク名</label>
+        <input ref=${inputRef} value=${name} onChange=${e => setName(e.target.value)}
+          onKeyDown=${e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) save(); }}
+          style=${S.input} placeholder="例: メール確認・返信" />
+      </div>
+      <div style=${{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+        <button onClick=${onClose} style=${S.btn(false)}>キャンセル</button>
+        <button onClick=${save} style=${S.btn(true)}>保存</button>
+      </div>
+    <//>
+  `;
+}
+
+// ============================================================
+// BACKUP MODAL
+// ============================================================
+function BackupModal({ tasks, fixedTasks, properties, setTasks, setFixedTasks, setProperties, onClose }) {
+  const [copied, setCopied] = useState(false);
+  const fileInputRef = React.useRef(null);
+  const incompleteTasks = tasks.filter(t => !t.isComplete);
+  const completedTasks = tasks.filter(t => t.isComplete);
+  const buildText = () => {
+    const lines = ['=== バックアップ ===', `作成日時: ${new Date().toLocaleString('ja-JP')}`, ''];
+    lines.push('--- 未完了タスク ---');
+    for (const t of incompleteTasks) {
+      lines.push(`[${PRIORITY_LABEL[t.priority]}] ${t.displayText}${t.propertyId ? ' (物件タスク)' : ''}`);
+      for (const s of (t.subTasks || [])) lines.push(`  - [${s.isComplete ? '✓' : ' '}] ${s.text}`);
+    }
+    lines.push('', '--- 完了タスク ---');
+    for (const t of completedTasks) lines.push(`[${dateLabel(t.completedAt)}] ${t.displayText}（${t.duration || '-'}分）${t.memo ? ' ' + t.memo : ''}`);
+    lines.push('', '--- 物件 ---');
+    for (const p of properties) lines.push(`○ ${p.name}${p.closedAt ? ' [決済済]' : ''}`);
+    lines.push('', '--- 固定タスク ---');
+    for (const f of fixedTasks) {
+      lines.push(f.name);
+      const grouped = groupByDate(f.entries || [], e => e.at);
+      for (const [date, entries] of grouped) {
+        const total = entries.reduce((s, e) => s + (Number(e.duration) || 0), 0);
+        lines.push(`  ${date}: ${total}分（${entries.length}件）`);
+      }
+    }
+    return lines.join('\n');
+  };
+  const text = buildText();
+  const copy = () => { navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }); };
+  const download = () => {
+    const data = JSON.stringify({ tasks, fixedTasks, properties }, null, 2);
+    const blob = new Blob([data], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const d = new Date();
+    const dateStr = `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
+    a.download = `taskapp_backup_${dateStr}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+  const handleImport = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = JSON.parse(ev.target.result);
+        if (data.tasks) setTasks(data.tasks);
+        if (data.fixedTasks) setFixedTasks(data.fixedTasks);
+        if (data.properties) setProperties(data.properties);
+        alert(`復元しました\nタスク: ${data.tasks?.length || 0}件\n固定タスク: ${data.fixedTasks?.length || 0}件\n物件: ${data.properties?.length || 0}件`);
+        onClose();
+      } catch {
+        alert('ファイルが正しくありません');
+      }
+    };
+    reader.readAsText(file);
+  };
+  return html`
+    <${ModalBase} onClose=${onClose} title="💾 バックアップ" width=${580}>
+      <div style=${{ marginBottom: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+        <span style=${{ fontSize: 12, color: C.textMuted }}>未完了: ${incompleteTasks.length}件 / 完了: ${completedTasks.length}件 / 物件: ${properties.length}件</span>
+        <div style=${{ display: 'flex', gap: 6 }}>
+          <button onClick=${copy} style=${S.btn(copied)}>${copied ? 'コピー済み ✓' : 'クリップボードにコピー'}</button>
+          <button onClick=${download} style=${S.btn(false)}>JSONダウンロード</button>
+          <button onClick=${() => fileInputRef.current.click()} style=${S.btn(false)}>JSONから復元</button>
+          <input ref=${fileInputRef} type="file" accept=".json" onChange=${handleImport} style=${{ display: 'none' }} />
+        </div>
+      </div>
+      <textarea readOnly value=${text} style=${{ ...S.textarea, height: 360, fontSize: 11, fontFamily: 'monospace', color: C.textMuted }} />
+    <//>
+  `;
+}
+
+// ============================================================
+// PROPERTY MANAGE MODAL（物件の追加・編集・削除）
+// ============================================================
+function PropertyManageModal({ properties, onAdd, onEdit, onDelete, onClose }) {
+  const [newName, setNewName] = useState('');
+  const [editingId, setEditingId] = useState(null);
+  const [editName, setEditName] = useState('');
+  const add = () => { if (!newName.trim()) return; onAdd(newName.trim()); setNewName(''); };
+  return html`
+    <${ModalBase} onClose=${onClose} title="物件管理" width=${500}>
+      <div style=${{ marginBottom: 16 }}>
+        <div style=${S.sectionTitle}>登録済み物件（${properties.length}件）</div>
+        ${properties.length === 0 && html`<div style=${{ fontSize: 13, color: C.textLight, padding: '8px 0' }}>物件が登録されていません</div>`}
+        ${properties.map(p => html`
+          <div key=${p.id} style=${{ ...S.card, marginBottom: 4 }}>
+            ${editingId === p.id ? html`
+              <div style=${{ display: 'flex', gap: 6 }}>
+                <input value=${editName} onChange=${e => setEditName(e.target.value)}
+                  onKeyDown=${e => { if (e.key === 'Enter') { onEdit(p.id, editName); setEditingId(null); } }}
+                  style=${{ ...S.input, flex: 1 }} />
+                <button onClick=${() => { onEdit(p.id, editName); setEditingId(null); }} style=${S.btnSmall}>保存</button>
+                <button onClick=${() => setEditingId(null)} style=${S.btnIcon}>×</button>
+              </div>
+            ` : html`
+              <div style=${{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style=${{ flex: 1 }}>○ ${p.name}</span>
+                ${p.closedAt ? html`<span style=${{ fontSize: 11, color: C.textLight }}>[決済済]</span>` : null}
+                <button onClick=${() => { setEditingId(p.id); setEditName(p.name); }} style=${S.btnIcon}>✏ 名前変更</button>
+              </div>
+            `}
+          </div>
+        `)}
+      </div>
+      <div style=${{ borderTop: `1px solid ${C.border}`, paddingTop: 12, marginBottom: 14 }}>
+        <div style=${{ fontSize: 12, color: C.textMuted, marginBottom: 6 }}>新しい物件を追加</div>
+        <div style=${{ display: 'flex', gap: 6 }}>
+          <input value=${newName} onChange=${e => setNewName(e.target.value)}
+            onKeyDown=${e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) add(); }}
+            style=${{ ...S.input, flex: 1 }} placeholder="例: 鎌倉市大船 〇〇マンション101" />
+          <button onClick=${add} style=${S.btnSmall}>追加</button>
+        </div>
+      </div>
+      <div style=${{ display: 'flex', justifyContent: 'flex-end' }}>
+        <button onClick=${onClose} style=${S.btn(false)}>閉じる</button>
+      </div>
+    <//>
+  `;
+}
+
+// ============================================================
+// PROPERTY SIDEBAR（右引き出し型）
+// ============================================================
+function PropertySidebar({ property, tasks, onClose }) {
+  const propertyTasks = tasks.filter(t => t.propertyId === property.id);
+  const incomplete = propertyTasks.filter(t => !t.isComplete)
+    .sort((a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority]);
+  const completed = propertyTasks.filter(t => t.isComplete)
+    .sort((a, b) => new Date(b.completedAt) - new Date(a.completedAt));
+  const all = [...incomplete, ...completed];
+  const [showAll, setShowAll] = useState(false);
+  const shown = showAll ? all : all.slice(0, 5);
+
+  return html`
+    <div
+      style=${{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.3)', zIndex: 900 }}
+      onMouseDown=${e => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div style=${{ position: 'absolute', right: 0, top: 0, bottom: 0, width: 340, maxWidth: '90vw', backgroundColor: C.bg, borderLeft: `1px solid ${C.borderDark}`, padding: 16, overflowY: 'auto' }}>
+        <div style=${{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+          <span style=${{ fontWeight: 'bold', fontSize: 14 }}>○ ${property.name}</span>
+          <button onClick=${onClose} style=${S.btnIcon}>×</button>
+        </div>
+        <div style=${{ fontSize: 12, color: C.textMuted, marginBottom: 12, paddingBottom: 10, borderBottom: `1px solid ${C.border}` }}>
+          未完了: ${incomplete.length}件 ／ 完了: ${completed.length}件
+        </div>
+
+        ${shown.map(t => html`
+          <div key=${t.id} style=${{ ...S.card, backgroundColor: t.isComplete ? C.bgSub : C.bg, marginBottom: 5 }}>
+            <div style=${{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+              <span style=${{ color: t.isComplete ? C.textLight : C.text, marginTop: 1 }}>${t.isComplete ? '✓' : '☐'}</span>
+              <div style=${{ flex: 1 }}>
+                <div style=${{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+                  <span style=${{ fontSize: 13, textDecoration: t.isComplete ? 'line-through' : 'none', color: t.isComplete ? C.textMuted : C.text }}>${t.displayText}</span>
+                  <span style=${priorityBadge(t.priority)}>${PRIORITY_LABEL[t.priority]}</span>
+                </div>
+                ${t.isComplete ? html`
+                  <div style=${{ fontSize: 11, color: C.textLight, marginTop: 2 }}>
+                    ${t.completedAt ? dateLabel(t.completedAt) : ''}${t.duration ? ' ' + t.duration + '分' : ''}${t.memo ? ' / ' + t.memo : ''}
+                  </div>
+                ` : null}
+                ${t.subTasks && t.subTasks.length > 0 ? html`
+                  <div style=${{ marginTop: 4 }}>
+                    ${t.subTasks.map(s => html`
+                      <div key=${s.id} style=${{ fontSize: 12, color: C.textLight }}>[${s.isComplete ? '✓' : ' '}] ${s.text}</div>
+                    `)}
+                  </div>
+                ` : null}
+              </div>
+            </div>
+          </div>
+        `)}
+
+        ${all.length > 5 && !showAll ? html`
+          <button onClick=${() => setShowAll(true)} style=${{ ...S.btnSmall, width: '100%', textAlign: 'center', padding: '7px', marginTop: 4 }}>
+            続きを見る（あと${all.length - 5}件）
+          </button>
+        ` : null}
+        ${all.length === 0 ? html`
+          <div style=${{ fontSize: 13, color: C.textLight, padding: '20px 0', textAlign: 'center' }}>タスクがありません</div>
+        ` : null}
+      </div>
+    </div>
+  `;
+}
+
+// ============================================================
+// SUBTASK LIST
+// ============================================================
+function SubTaskList({ subTasks, taskId, onToggle }) {
+  if (!subTasks || subTasks.length === 0) return null;
+  return html`
+    <div style=${{ marginTop: 6, paddingLeft: 12 }}>
+      ${subTasks.map(s => html`
+        <div key=${s.id} style=${{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
+          <input type="checkbox" checked=${s.isComplete} onChange=${() => onToggle(taskId, s.id)} style=${{ cursor: 'pointer' }} />
+          <span style=${{ fontSize: 12, color: s.isComplete ? C.textLight : C.text, textDecoration: s.isComplete ? 'line-through' : 'none' }}>${s.text}</span>
+        </div>
+      `)}
+    </div>
+  `;
+}
+
+// ============================================================
+// TASK ITEM
+// ============================================================
+function TaskItem({ task, property, onClickComplete, onDelete, onEdit, onToggleSub }) {
+  const isOld = !isToday(task.createdAt);
+  const cardBg = task.priority === 'high' ? C.highBg : task.priority === 'medium' ? C.medBg : C.bg;
+  return html`
+    <div style=${{ ...S.card, backgroundColor: cardBg }}>
+      <div style=${{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+        <button onClick=${() => onClickComplete(task)} style=${{ ...S.btnIcon, minWidth: 24, marginTop: 1 }} title="完了にする">○</button>
+        <div style=${{ flex: 1 }}>
+          <div style=${{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+            <span style=${{ fontSize: 13, color: C.text }}>${task.displayText}</span>
+            ${isOld ? html`<span style=${{ fontSize: 11, color: C.textMuted }}>（${dateLabel(task.createdAt)}から）</span>` : null}
+          </div>
+          <${SubTaskList} subTasks=${task.subTasks} taskId=${task.id} onToggle=${onToggleSub} />
+        </div>
+        ${property ? html`
+          <span style=${{ fontSize: 11, border: `1px solid ${C.border}`, padding: '1px 6px', borderRadius: 2, color: C.textMuted, whiteSpace: 'nowrap', alignSelf: 'center' }}>
+            ${property.name}
+          </span>
+        ` : null}
+        <button onClick=${() => onEdit(task)} style=${S.btnIcon} title="編集">✏</button>
+        ${!property ? html`<button onClick=${() => onDelete(task.id)} style=${S.btnIcon} title="削除">×</button>` : null}
+      </div>
+    </div>
+  `;
+}
+
+// ============================================================
+// COMPLETED TASK ITEM
+// ============================================================
+function CompletedTaskItem({ task, property, onUncomplete, onDelete }) {
+  return html`
+    <div style=${{ ...S.card, backgroundColor: C.bgSub }}>
+      <div style=${{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+        <button onClick=${() => onUncomplete(task.id)} style=${{ ...S.btnIcon, minWidth: 24, marginTop: 1, fontWeight: 'bold' }} title="未完了に戻す">✓</button>
+        <div style=${{ flex: 1 }}>
+          <div style=${{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+            <span style=${{ fontSize: 13, textDecoration: 'line-through', color: C.textMuted }}>${task.displayText}</span>
+            ${task.completedAt ? html`<span style=${{ fontSize: 11, color: C.textLight }}>${formatDateTime(task.completedAt)}完了</span>` : null}
+            ${task.duration ? html`<span style=${{ fontSize: 11, color: C.textLight }}>${task.duration}分</span>` : null}
+            ${property ? html`<span style=${{ fontSize: 11, border: `1px solid ${C.border}`, padding: '1px 6px', borderRadius: 2, color: C.textMuted, whiteSpace: 'nowrap' }}>${property.name}</span>` : null}
+          </div>
+          ${task.memo ? html`<div style=${{ fontSize: 12, color: C.textMuted, marginTop: 3 }}>${task.memo}</div>` : null}
+          ${task.subTasks && task.subTasks.length > 0 ? html`
+            <div style=${{ marginTop: 4 }}>
+              ${task.subTasks.map(s => html`<div key=${s.id} style=${{ fontSize: 12, color: C.textLight }}>[${s.isComplete ? '✓' : ' '}] ${s.text}</div>`)}
+            </div>
+          ` : null}
+        </div>
+        <button onClick=${() => onDelete(task.id)} style=${S.btnIcon} title="削除">×</button>
+      </div>
+    </div>
+  `;
+}
+
+// ============================================================
+// PROPERTY ACCORDION（物件タスクグループ）
+// ============================================================
+function PropertyAccordion({ property, tasks, onAdd, onClickComplete, onDelete, onEdit, onToggleSub, onOpenSidebar, onToggleHidden }) {
+  const pTasks = tasks
+    .filter(t => !t.isComplete && t.propertyId === property.id)
+    .sort((a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority]);
+  const [expanded, setExpanded] = useState(true);
+  const [inlineInput, setInlineInput] = useState('');
+  const composingRef = useRef(false);
+
+  const submitInline = () => {
+    if (!inlineInput.trim()) return;
+    onAdd(inlineInput, property.id);
+    setInlineInput('');
+  };
+
+  return html`
+    <div style=${{ marginBottom: 10 }}>
+      <!-- 物件名タイトル行 -->
+      <div style=${{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginBottom: 4 }}>
+        <span style=${{ fontWeight: 'bold', fontSize: 14, flex: 1 }}>${property.name}</span>
+        <span style=${{ fontSize: 11, border: `1px solid ${C.border}`, padding: '1px 6px', borderRadius: 2, color: C.textMuted }}>残${pTasks.length}件</span>
+        <button onClick=${() => onOpenSidebar(property)} style=${S.btnSmall}>物件ビュー →</button>
+        <button onClick=${() => onToggleHidden(property.id)} style=${{ ...S.btnIcon, fontSize: 11 }}>今日は非表示</button>
+        <button onClick=${() => setExpanded(v => !v)} style=${S.btnIcon}>${expanded ? '▲' : '▼'}</button>
+      </div>
+      <!-- タスクエリア -->
+      ${expanded ? html`
+        <div style=${{ border: `1px solid ${C.border}`, borderRadius: 4, backgroundColor: C.bg, padding: '8px 10px' }}>
+          ${pTasks.length === 0 ? html`
+            <div style=${{ fontSize: 12, color: C.textLight, padding: '4px 0' }}>未完了タスクはありません</div>
+          ` : pTasks.map(t => html`
+            <${TaskItem} key=${t.id} task=${t}
+              onClickComplete=${onClickComplete} onDelete=${onDelete}
+              onEdit=${onEdit} onToggleSub=${onToggleSub}
+            />
+          `)}
+          <div style=${{ display: 'flex', gap: 5, marginTop: 6 }}>
+            <input
+              value=${inlineInput}
+              onChange=${e => setInlineInput(e.target.value)}
+              onCompositionStart=${() => { composingRef.current = true; }}
+              onCompositionEnd=${() => { composingRef.current = false; }}
+              onKeyDown=${e => { if (e.key === 'Enter' && !composingRef.current) submitInline(); }}
+              style=${{ ...S.input, flex: 1, fontSize: 12, padding: '3px 7px' }}
+              placeholder="ここにタスクを追加..."
+            />
+            <button onClick=${submitInline} style=${S.btnSmall}>＋</button>
+          </div>
+        </div>
+      ` : null}
+    </div>
+  `;
+}
+
+// ============================================================
+// FIXED TASK ITEM（追加: 名前編集・削除ボタン）
+// ============================================================
+function FixedTaskItem({ fixedTask, onOpenEntry, onDeleteEntry, onEditName, onDeleteTask }) {
+  const todayEntries = (fixedTask.entries || []).filter(e => isToday(e.at));
+  const hasTodayRecord = todayEntries.length > 0;
+  const [expanded, setExpanded] = useState(false);
+  const grouped = groupByDate(fixedTask.entries || [], e => e.at);
+
+  return html`
+    <div style=${{ ...S.card, borderLeft: hasTodayRecord ? `3px solid ${C.borderBlack}` : `1px solid ${C.border}` }}>
+      <div style=${{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+        <span style=${{ fontWeight: hasTodayRecord ? 'bold' : 'normal' }}>${fixedTask.name}</span>
+        ${todayEntries.map((e, i) => html`
+          <span key=${i} style=${{ fontSize: 11, border: `1px solid ${C.borderBlack}`, padding: '1px 5px', borderRadius: 2 }}>
+            ${e.duration}分
+          </span>
+        `)}
+        <span style=${{ flex: 1 }} />
+        <button onClick=${() => onOpenEntry(fixedTask)} style=${S.btnSmall}>＋ 時間追加</button>
+        <button onClick=${() => onEditName(fixedTask)} style=${S.btnIcon} title="名前を編集">✏</button>
+        <button onClick=${() => onDeleteTask(fixedTask.id)} style=${S.btnIcon} title="削除">×</button>
+        ${grouped.length > 0 ? html`
+          <button onClick=${() => setExpanded(v => !v)} style=${S.btnIcon}>${expanded ? '▲' : '▼'}</button>
+        ` : null}
+      </div>
+      ${expanded ? html`
+        <div style=${{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${C.border}` }}>
+          ${grouped.map(([date, entries]) => {
+            const total = entries.reduce((s, e) => s + (Number(e.duration) || 0), 0);
+            return html`
+              <div key=${date} style=${{ marginBottom: 6 }}>
+                <div style=${{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
+                  <span style=${{ fontSize: 12, fontWeight: 'bold' }}>${date}（合計 ${total}分）</span>
+                  <button onClick=${() => onDeleteEntry(fixedTask.id, date)} style=${{ ...S.btnIcon, fontSize: 11 }}>この日削除</button>
+                </div>
+                ${entries.map((e, i) => html`
+                  <div key=${i} style=${{ fontSize: 12, color: C.textMuted, paddingLeft: 8 }}>
+                    ${formatDateTime(e.at)}　${e.duration}分
+                  </div>
+                `)}
+              </div>
+            `;
+          })}
+        </div>
+      ` : null}
+    </div>
+  `;
+}
+
+// ============================================================
+// TASK INPUT（物件セレクター付き）
+// ============================================================
+function TaskInput({ onAdd, properties }) {
+  const [input, setInput] = useState('');
+  const [propertyId, setPropertyId] = useState('');
+  const composingRef = useRef(false);
+
+  const submit = () => {
+    if (!input.trim()) return;
+    onAdd(input, propertyId || null);
+    setInput('');
+    // propertyId は保持（同じ物件に連続追加できるようにする）
+  };
+  const handleKeyDown = (e) => {
+    if (e.shiftKey && e.key === 'Enter' && !composingRef.current) { e.preventDefault(); submit(); }
+  };
+
+  return html`
+    <div style=${{ marginBottom: 16 }}>
+      <textarea
+        value=${input} onChange=${e => setInput(e.target.value)}
+        onKeyDown=${handleKeyDown}
+        onCompositionStart=${() => { composingRef.current = true; }}
+        onCompositionEnd=${() => { composingRef.current = false; }}
+        style=${{ ...S.textarea, height: 72, marginBottom: 6 }}
+        placeholder=${"タスクを入力（Shift+Enter で追加）\n2行目以降はサブタスクになります"}
+      />
+      <div style=${{ display: 'flex', gap: 8, marginBottom: 6, alignItems: 'center' }}>
+        <span style=${{ fontSize: 12, color: C.textMuted, whiteSpace: 'nowrap' }}>物件：</span>
+        <select value=${propertyId} onChange=${e => setPropertyId(e.target.value)} style=${{ ...S.select, flex: 1 }}>
+          <option value="">なし（通常タスク）</option>
+          ${properties.filter(p => !p.closedAt).map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
+        </select>
+      </div>
+      <div style=${{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span style=${{ fontSize: 11, color: C.textLight }}>!! 高 ／ ! 中 ／ 〇件 軽 ／ その他 低</span>
+        <button onClick=${submit} style=${{ ...S.btn(false), padding: '5px 16px' }}>追加</button>
+      </div>
+    </div>
+  `;
+}
+
+// ============================================================
+// TODAY VIEW（3ブロック構造）
+// ============================================================
+function TodayView({
+  tasks, fixedTasks, properties,
+  onAdd, onComplete, onUncomplete, onDeleteTask, onEditTask, onToggleSub,
+  onOpenEntry, onDeleteEntry, onAddFixedTask, onEditFixedTaskName, onDeleteFixedTask,
+  onTogglePropertyHidden, onOpenPropertySidebar, onOpenPropertyManage, onReorderProperties,
+}) {
+  const today = todayKey();
+  const incompleteTasks = tasks.filter(t => !t.isComplete);
+  // 通常タスク: propertyId なし、priority が light 以外
+  const normalTasks = incompleteTasks
+    .filter(t => !t.propertyId && t.priority !== 'light')
+    .sort((a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority]);
+
+  // 物件タスク: propertyId あり（propertyAccordion で表示）
+  const visibleProperties = properties.filter(p => !p.closedAt && !p.isHiddenFromToday);
+  const hiddenProperties = properties.filter(p => !p.closedAt && p.isHiddenFromToday);
+
+  // 軽タスク: priority === 'light'（propertyId なし）
+  const lightTasks = incompleteTasks
+    .filter(t => t.priority === 'light' && !t.propertyId);
+
+  const completedToday = tasks
+    .filter(t => t.isComplete && t.completedAt && toDateKey(t.completedAt) === today)
+    .sort((a, b) => new Date(b.completedAt) - new Date(a.completedAt));
+
+  const [completeTarget, setCompleteTarget] = useState(null);
+  const [editTarget, setEditTarget] = useState(null);
+  const [fixedEditTarget, setFixedEditTarget] = useState(null);
+  const [showFixedAdd, setShowFixedAdd] = useState(false);
+  const [dragId, setDragId] = useState(null);
+
+  return html`
+    <div>
+      <!-- タスク入力 -->
+      <${TaskInput} onAdd=${onAdd} properties=${properties} />
+
+      <!-- 固定タスク -->
+      <div style=${S.section}>
+        <div style=${{ ...S.sectionTitle, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>固定タスク（${fixedTasks.length}件）</span>
+          <button onClick=${() => setShowFixedAdd(true)} style=${S.btnSmall}>＋ 追加</button>
+        </div>
+        ${fixedTasks.length === 0 ? html`
+          <div style=${{ fontSize: 13, color: C.textLight, padding: '6px 0' }}>固定タスクがありません</div>
+        ` : fixedTasks.map(f => html`
+          <${FixedTaskItem}
+            key=${f.id} fixedTask=${f}
+            onOpenEntry=${onOpenEntry}
+            onDeleteEntry=${onDeleteEntry}
+            onEditName=${(task) => setFixedEditTarget(task)}
+            onDeleteTask=${onDeleteFixedTask}
+          />
+        `)}
+      </div>
+
+      <!-- 未完了タスク -->
+      <div style=${S.section}>
+        <div style=${S.sectionTitle}>未完了タスク</div>
+
+        <!-- 通常タスク -->
+        <div style=${{ fontSize: 11, color: C.textLight, marginBottom: 6, fontWeight: 'bold' }}>通常タスク（${normalTasks.length}件）</div>
+        ${normalTasks.length === 0 ? html`
+          <div style=${{ fontSize: 13, color: C.textLight, padding: '4px 0 10px' }}>なし</div>
+        ` : normalTasks.map(t => html`
+          <${TaskItem} key=${t.id} task=${t}
+            onClickComplete=${(task) => setCompleteTarget(task)}
+            onDelete=${onDeleteTask}
+            onEdit=${(task) => setEditTarget(task)}
+            onToggleSub=${onToggleSub}
+          />
+        `)}
+
+        <hr style=${S.divider} />
+
+        <!-- 物件タスク -->
+        <div style=${{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+          <span style=${{ fontSize: 11, color: C.textLight, fontWeight: 'bold' }}>物件タスク（${visibleProperties.length}件）</span>
+          <button onClick=${onOpenPropertyManage} style=${S.btnSmall}>物件管理</button>
+        </div>
+        ${visibleProperties.length === 0 && properties.filter(p => !p.closedAt).length === 0 ? html`
+          <div style=${{ fontSize: 13, color: C.textLight, padding: '4px 0 10px' }}>物件が登録されていません</div>
+        ` : null}
+        ${visibleProperties.map(p => html`
+          <div key=${p.id}
+            draggable="true"
+            onDragStart=${() => setDragId(p.id)}
+            onDragOver=${e => e.preventDefault()}
+            onDrop=${() => { if (dragId && dragId !== p.id) onReorderProperties(dragId, p.id); setDragId(null); }}
+            style=${{ opacity: dragId === p.id ? 0.4 : 1, cursor: 'grab' }}
+          >
+            <${PropertyAccordion}
+              property=${p} tasks=${tasks}
+              onAdd=${onAdd}
+              onClickComplete=${(task) => setCompleteTarget(task)}
+              onDelete=${onDeleteTask}
+              onEdit=${(task) => setEditTarget(task)}
+              onToggleSub=${onToggleSub}
+              onOpenSidebar=${onOpenPropertySidebar}
+              onToggleHidden=${onTogglePropertyHidden}
+            />
+          </div>
+        `)}
+        ${hiddenProperties.length > 0 ? html`
+          <div style=${{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', padding: '6px 0' }}>
+            <span style=${{ fontSize: 11, color: C.textLight }}>非表示中：</span>
+            ${hiddenProperties.map(p => html`
+              <button key=${p.id} onClick=${() => onTogglePropertyHidden(p.id)}
+                style=${{ fontSize: 11, border: `1px solid ${C.borderDark}`, padding: '2px 8px', backgroundColor: C.bgSub, borderRadius: 3, cursor: 'pointer' }}>
+                ${p.name}　再表示 ▶
+              </button>
+            `)}
+          </div>
+        ` : null}
+
+        <hr style=${S.divider} />
+
+        <!-- 軽タスク・備忘録 -->
+        <div style=${{ fontSize: 11, color: C.textLight, marginBottom: 6, fontWeight: 'bold' }}>備忘録・軽タスク（${lightTasks.length}件）</div>
+        ${lightTasks.length === 0 ? html`
+          <div style=${{ fontSize: 13, color: C.textLight, padding: '4px 0' }}>なし</div>
+        ` : lightTasks.map(t => html`
+          <${TaskItem} key=${t.id} task=${t}
+            onClickComplete=${(task) => setCompleteTarget(task)}
+            onDelete=${onDeleteTask}
+            onEdit=${(task) => setEditTarget(task)}
+            onToggleSub=${onToggleSub}
+          />
+        `)}
+      </div>
+
+      <!-- 今日の完了 -->
+      <div style=${S.section}>
+        <div style=${S.sectionTitle}>今日の完了（${completedToday.length}件）</div>
+        ${completedToday.length === 0 ? html`
+          <div style=${{ fontSize: 13, color: C.textLight, padding: '6px 0' }}>今日完了したタスクはありません</div>
+        ` : completedToday.map(t => {
+          const prop = t.propertyId ? properties.find(p => p.id === t.propertyId) : null;
+          return html`<${CompletedTaskItem} key=${t.id} task=${t} property=${prop} onUncomplete=${onUncomplete} onDelete=${onDeleteTask} />`;
+        })}
+      </div>
+
+      <!-- モーダル群 -->
+      ${completeTarget ? html`
+        <${CompleteModal} task=${completeTarget} onComplete=${onComplete} onClose=${() => setCompleteTarget(null)} />
+      ` : null}
+      ${editTarget ? html`
+        <${EditModal} task=${editTarget} properties=${properties} onSave=${onEditTask} onClose=${() => setEditTarget(null)} />
+      ` : null}
+      ${showFixedAdd ? html`
+        <${FixedTaskNameModal} task=${null} onSave=${onAddFixedTask} onClose=${() => setShowFixedAdd(false)} />
+      ` : null}
+      ${fixedEditTarget ? html`
+        <${FixedTaskNameModal} task=${fixedEditTarget} onSave=${(name) => onEditFixedTaskName(fixedEditTarget.id, name)} onClose=${() => setFixedEditTarget(null)} />
+      ` : null}
+    </div>
+  `;
+}
+
+// ============================================================
+// DAILY REPORT VIEW
+// ============================================================
+function DailyReportView({ tasks, fixedTasks, properties, reflections, onSaveReflection }) {
+  const report = generateDailyReportText(tasks, fixedTasks, properties);
+  const [copied, setCopied] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [questions, setQuestions] = useState([]);
+  const [answers, setAnswers] = useState([]);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState('');
+  const today = todayKey();
+  const todayReflection = (reflections || []).find(r => r.date === today);
+
+  useEffect(() => {
+    if (todayReflection) {
+      setQuestions(todayReflection.questions.map(q => q.question));
+      setAnswers(todayReflection.questions.map(q => q.answer));
+      setSaved(true);
+    }
+  }, []);
+
+  const copy = () => { navigator.clipboard.writeText(report).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }); };
+
+  const startReflection = async () => {
+    const key = (sessionStorage.getItem('taskapp_anthropic_key') || '').trim().replace(/[^\x20-\x7E]/g, '');
+    if (!key) { setError('APIキーが未設定です。週次タブで設定してください。'); return; }
+    setLoading(true); setError('');
+    const completedToday = tasks.filter(t => t.isComplete && t.completedAt && toDateKey(t.completedAt) === today && t.priority !== 'light');
+    const propertyMap = Object.fromEntries((properties || []).map(p => [p.id, p]));
+    const taskSummary = completedToday.map(t => {
+      const propName = t.propertyId ? (propertyMap[t.propertyId]?.name || '') + ' ' : '';
+      return `・${propName}${t.displayText}${t.memo ? '（メモ：' + t.memo + '）' : ''}`;
+    }).join('\n') || '（完了タスクなし）';
+    const prompt = `今日完了したタスクをもとに、識学の週次報告（不足・行動変化・約束）に役立つ振り返り質問を3〜5つ作成してください。\n\n今日の完了タスク：\n${taskSummary}\n\n条件：質問は短く具体的に。不足・原因・改善・明日の約束に関する内容。質問文だけを1行ずつ返してください（番号不要）。`;
+    try {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+        body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 400, messages: [{ role: 'user', content: prompt }] }),
+      });
+      if (!res.ok) { const err = await res.json(); throw new Error(err.error?.message || 'HTTP ' + res.status); }
+      const data = await res.json();
+      const qs = data.content[0].text.split('\n').map(l => l.trim()).filter(l => l.length > 0).slice(0, 5);
+      setQuestions(qs); setAnswers(qs.map(() => '')); setSaved(false);
+    } catch(e) { setError('エラー: ' + e.message); }
+    finally { setLoading(false); }
+  };
+
+  const saveReflection = () => {
+    onSaveReflection({ date: today, questions: questions.map((q, i) => ({ question: q, answer: answers[i] || '' })), savedAt: Date.now() });
+    setSaved(true);
+  };
+
+  return html`
+    <div>
+      <div style=${{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+        <div style=${S.sectionTitle}>日次報告</div>
+        <button onClick=${copy} style=${S.btn(copied)}>${copied ? 'コピー済み ✓' : 'コピー'}</button>
+      </div>
+      <textarea readOnly value=${report} style=${{ ...S.textarea, height: 400, fontFamily: 'monospace', fontSize: 13 }} />
+
+      <div style=${{ marginTop: 24 }}>
+        <div style=${{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+          <div style=${S.sectionTitle}>今日の振り返り</div>
+          <button onClick=${startReflection} style=${S.btn(false)} disabled=${loading}>${loading ? '生成中...' : saved ? '再生成' : '振り返りを開始'}</button>
+        </div>
+        ${error ? html`<div style=${{ fontSize: 13, color: C.highText, marginBottom: 8 }}>${error}</div>` : null}
+        ${questions.length > 0 ? html`
+          <div>
+            ${questions.map((q, i) => html`
+              <div key=${i} style=${{ marginBottom: 14 }}>
+                <div style=${{ fontSize: 13, color: C.text, marginBottom: 4 }}>${q}</div>
+                <textarea
+                  value=${answers[i] || ''}
+                  onChange=${e => { const a = [...answers]; a[i] = e.target.value; setAnswers(a); setSaved(false); }}
+                  style=${{ ...S.textarea, height: 60, fontSize: 13 }}
+                  placeholder="回答を入力..."
+                />
+              </div>
+            `)}
+            <div style=${{ display: 'flex', justifyContent: 'flex-end', gap: 8, alignItems: 'center' }}>
+              ${saved ? html`<span style=${{ fontSize: 13, color: C.textMuted }}>保存済み ✓</span>` : null}
+              <button onClick=${saveReflection} style=${S.btn(saved)}>保存</button>
+            </div>
+          </div>
+        ` : html`
+          <div style=${{ padding: '20px 0', textAlign: 'center', color: C.textLight, fontSize: 13 }}>「振り返りを開始」ボタンを押すと、今日の完了タスクをもとに質問が生成されます</div>
+        `}
+      </div>
+    </div>
+  `;
+}
+
+// ============================================================
+// WEEKLY REPORT VIEW
+// ============================================================
+function WeeklyReportView({ tasks, fixedTasks, reflections }) {
+  const [report, setReport] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [apiKey, setApiKey] = useState('');
+  const [showKeyInput, setShowKeyInput] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const generate = async () => {
+    const key = (apiKey || sessionStorage.getItem('taskapp_anthropic_key') || '').trim().replace(/[^\x20-\x7E]/g, '');
+    if (!key) { setShowKeyInput(true); return; }
+    setLoading(true); setError('');
+    const weekStart = new Date();
+    weekStart.setDate(weekStart.getDate() - weekStart.getDay());
+    weekStart.setHours(0, 0, 0, 0);
+    const completedThisWeek = tasks.filter(t => t.isComplete && t.completedAt && new Date(t.completedAt) >= weekStart && t.priority !== 'light');
+    const incompleteThisWeek = tasks.filter(t => !t.isComplete && t.priority !== 'light');
+    const fixedSummary = fixedTasks.map(f => {
+      const entries = (f.entries || []).filter(e => new Date(e.at) >= weekStart);
+      return { name: f.name, count: entries.length, total: entries.reduce((s, e) => s + (Number(e.duration) || 0), 0) };
+    }).filter(f => f.count > 0);
+    const weekReflections = (reflections || []).filter(r => { const d = new Date(r.date); return d >= weekStart; });
+    const reflectionSummary = weekReflections.length > 0
+      ? weekReflections.map(r => `【${r.date}の振り返り】\n${r.questions.map(q => `Q: ${q.question}\nA: ${q.answer || '（未回答）'}`).join('\n')}`).join('\n\n')
+      : '（振り返りなし）';
+    const prompt = `以下のデータをもとに識学フォーマットの週次報告を作成してください。\n\n【今週完了タスク】\n${completedThisWeek.map(t => `・${t.displayText}${t.memo ? '（' + t.memo + '）' : ''}`).join('\n') || '（なし）'}\n\n【未完了タスク】\n${incompleteThisWeek.map(t => `・${t.displayText}`).join('\n') || '（なし）'}\n\n【毎日の振り返り記録】\n${reflectionSummary}\n\n以下の8項目で報告書を作成してください：\n1. 先週の目標と結果\n2. 未達の理由\n3. 行動変化\n4. 次の目標\n5. 補足事項\n6. 今週の不足\n7. 改善提案\n8. 報告・連絡事項（案）`;
+    try {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+        body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 2000, messages: [{ role: 'user', content: prompt }] }),
+      });
+      if (!res.ok) { const err = await res.json(); throw new Error(err.error?.message || 'HTTP ' + res.status); }
+      const data = await res.json();
+      setReport(data.content[0].text);
+    } catch (e) { setError('エラー: ' + e.message); }
+    finally { setLoading(false); }
+  };
+  const saveKey = () => { sessionStorage.setItem('taskapp_anthropic_key', apiKey); setShowKeyInput(false); generate(); };
+  const copy = () => { navigator.clipboard.writeText(report).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }); };
+
+  return html`
+    <div>
+      <div style=${{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+        <div style=${S.sectionTitle}>週次報告（AI生成）</div>
+        <div style=${{ display: 'flex', gap: 8 }}>
+          <button onClick=${() => setShowKeyInput(v => !v)} style=${S.btnSmall}>APIキー設定</button>
+          ${report ? html`<button onClick=${copy} style=${S.btn(copied)}>${copied ? 'コピー済み ✓' : 'コピー'}</button>` : null}
+          <button onClick=${generate} style=${S.btn(false)} disabled=${loading}>${loading ? '生成中...' : '週次報告を生成'}</button>
+        </div>
+      </div>
+      ${showKeyInput ? html`
+        <div style=${{ ...S.card, marginBottom: 12, backgroundColor: C.bgSub }}>
+          <div style=${{ fontSize: 12, color: C.textMuted, marginBottom: 6 }}>Anthropic APIキーを入力してください（タブを閉じると消去されます）</div>
+          <div style=${{ display: 'flex', gap: 6 }}>
+            <input type="password" value=${apiKey} onChange=${e => setApiKey(e.target.value)} style=${{ ...S.input, flex: 1 }} placeholder="sk-ant-..." />
+            <button onClick=${saveKey} style=${S.btnSmall}>保存して生成</button>
+          </div>
+        </div>
+      ` : null}
+      ${error ? html`<div style=${{ border: `1px solid ${C.borderBlack}`, padding: '8px 12px', marginBottom: 10, fontSize: 13 }}>${error}</div>` : null}
+      ${loading ? html`<div style=${{ padding: '20px 0', textAlign: 'center', color: C.textMuted, fontSize: 13 }}>AIが週次報告を生成しています...</div>` : null}
+      ${report && !loading ? html`<textarea readOnly value=${report} style=${{ ...S.textarea, height: 480, fontFamily: 'monospace', fontSize: 13 }} />` : null}
+      ${!report && !loading && !error ? html`<div style=${{ padding: '30px 0', textAlign: 'center', color: C.textLight, fontSize: 13 }}>「週次報告を生成」ボタンを押してください</div>` : null}
+    </div>
+  `;
+}
+
+// ============================================================
+// HISTORY VIEW
+// ============================================================
+function HistoryView({ tasks, properties }) {
+  const completed = tasks.filter(t => t.isComplete && t.completedAt);
+  const grouped = groupByDate(completed, t => t.completedAt);
+  const findProperty = (id) => properties.find(p => p.id === id);
+
+  if (grouped.length === 0) return html`<div style=${{ padding: '30px 0', textAlign: 'center', color: C.textLight, fontSize: 13 }}>完了タスクの履歴はありません</div>`;
+
+  return html`
+    <div>
+      <div style=${S.sectionTitle}>完了履歴</div>
+      ${grouped.map(([date, items]) => {
+        const totalDur = items.reduce((s, t) => s + (Number(t.duration) || 0), 0);
+        return html`
+          <div key=${date} style=${{ marginBottom: 16 }}>
+            <div style=${{ fontSize: 12, fontWeight: 'bold', marginBottom: 6, borderBottom: `1px solid ${C.border}`, paddingBottom: 4 }}>
+              ${date}（${items.length}件 / 合計 ${totalDur}分）
+            </div>
+            ${items.sort((a, b) => new Date(b.completedAt) - new Date(a.completedAt)).map(t => {
+              const prop = t.propertyId ? findProperty(t.propertyId) : null;
+              return html`
+                <div key=${t.id} style=${{ ...S.card, backgroundColor: C.bgSub }}>
+                  <div style=${{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+                    <span style=${priorityBadge(t.priority)}>${PRIORITY_LABEL[t.priority]}</span>
+                    <span style=${{ textDecoration: 'line-through', color: C.textMuted, fontSize: 13 }}>${t.displayText}</span>
+                    ${prop ? html`<span style=${{ fontSize: 11, border: `1px solid ${C.border}`, padding: '1px 5px', borderRadius: 2, color: C.textMuted }}>○ ${prop.name}</span>` : null}
+                    <span style=${{ fontSize: 11, color: C.textLight }}>${formatDateTime(t.completedAt)}</span>
+                    ${t.duration ? html`<span style=${{ fontSize: 11, color: C.textLight }}>${t.duration}分</span>` : null}
+                  </div>
+                  ${t.memo ? html`<div style=${{ fontSize: 12, color: C.textMuted, marginTop: 3 }}>${t.memo}</div>` : null}
+                </div>
+              `;
+            })}
+          </div>
+        `;
+      })}
+    </div>
+  `;
+}
+
+// ============================================================
+// TOAST / CONFLICT BANNER / HEADER
+// ============================================================
+function Toast({ message, onDone }) {
+  useEffect(() => { const id = setTimeout(onDone, 3000); return () => clearTimeout(id); }, [message]);
+  return html`
+    <div style=${{ position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)', backgroundColor: C.text, color: C.bg, padding: '8px 18px', borderRadius: 4, fontSize: 13, zIndex: 2000, whiteSpace: 'nowrap' }}>
+      ${message}
+    </div>
+  `;
+}
+
+function ConflictBanner({ onDismiss }) {
+  return html`
+    <div style=${{ backgroundColor: C.bgActive, border: `1px solid ${C.borderBlack}`, padding: '8px 12px', marginBottom: 8, fontSize: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <span>⚠ 別タブでデータが更新された可能性があります。ページを再読み込みしてください。</span>
+      <button onClick=${onDismiss} style=${S.btnIcon}>×</button>
+    </div>
+  `;
+}
+
+function Header({ view, onNav, onBackup, onDeleteDropdown, deleteDropdownOpen, onBulkDelete }) {
+  const today = new Date();
+  const dateStr = `${today.getFullYear()}年${today.getMonth()+1}月${today.getDate()}日（${'日月火水木金土'[today.getDay()]}）`;
+  const navs = [{ key: 'today', label: '今日' }, { key: 'daily', label: '日次' }, { key: 'weekly', label: '週次' }, { key: 'history', label: '完了' }];
+  return html`
+    <div style=${{ position: 'sticky', top: 0, backgroundColor: C.bg, borderBottom: `1px solid ${C.border}`, zIndex: 500, padding: '8px 0' }}>
+      <div style=${{ maxWidth: 640, margin: '0 auto', padding: '0 12px' }}>
+        <div style=${{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+          <span style=${{ fontWeight: 'bold', fontSize: 15 }}>業務タスク管理</span>
+          <span style=${{ fontSize: 12, color: C.textMuted }}>${dateStr}</span>
+        </div>
+        <div style=${{ display: 'flex', gap: 5, flexWrap: 'wrap', alignItems: 'center' }}>
+          ${navs.map(n => html`
+            <button key=${n.key} onClick=${() => onNav(n.key)} style=${{ ...S.btn(view === n.key), borderBottom: view === n.key ? `2px solid ${C.borderBlack}` : `1px solid ${C.borderDark}` }}>${n.label}</button>
+          `)}
+          <button onClick=${onBackup} style=${S.btnIcon} title="バックアップ">💾</button>
+          <div style=${{ position: 'relative' }}>
+            <button onClick=${onDeleteDropdown} style=${S.btnIcon} title="一括削除">🗑</button>
+            ${deleteDropdownOpen ? html`
+              <div style=${{ position: 'absolute', top: '110%', right: 0, backgroundColor: C.bg, border: `1px solid ${C.borderDark}`, borderRadius: 3, zIndex: 600, minWidth: 200 }}>
+                ${[7, 14, 30].map(d => html`
+                  <button key=${d} onClick=${() => onBulkDelete(d)} style=${{ display: 'block', width: '100%', textAlign: 'left', padding: '7px 12px', border: 'none', backgroundColor: C.bg, cursor: 'pointer', fontSize: 13, borderBottom: `1px solid ${C.border}` }}>
+                    ${d}日以上前の完了タスクを削除
+                  </button>
+                `)}
+              </div>
+            ` : null}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// ============================================================
+// INITIAL DATA
+// ============================================================
+const INITIAL_FIXED_TASKS = [
+  { id: 'f1', name: 'メール確認・返信', entries: [] },
+  { id: 'f2', name: '物件情報更新', entries: [] },
+  { id: 'f3', name: '日報作成', entries: [] },
+];
+const INITIAL_PROPERTIES = [];
+
+// ============================================================
+// APP
+// ============================================================
+const PASSWORD = 'pass256256';
+
+function PasswordGate({ onAuthed }) {
+  const [pwInput, setPwInput] = useState('');
+  const [pwError, setPwError] = useState(false);
+  const handleLogin = () => {
+    if (pwInput === PASSWORD) {
+      localStorage.setItem('taskapp_authed', '1');
+      onAuthed();
+    } else {
+      setPwError(true);
+      setPwInput('');
+    }
+  };
+  return html`
+    <div style=${{ minHeight: '100vh', backgroundColor: C.bgPage, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style=${{ backgroundColor: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, padding: '40px 48px', width: 320 }}>
+        <div style=${{ fontSize: 16, fontWeight: 600, color: C.text, marginBottom: 24, textAlign: 'center' }}>タスク管理</div>
+        <input
+          type="password"
+          value=${pwInput}
+          onInput=${e => { setPwInput(e.target.value); setPwError(false); }}
+          onKeyDown=${e => e.key === 'Enter' && handleLogin()}
+          placeholder="パスワード"
+          autoFocus
+          style=${{ width: '100%', padding: '8px 10px', border: `1px solid ${pwError ? C.highText : C.border}`, borderRadius: 4, fontSize: 14, outline: 'none', boxSizing: 'border-box', marginBottom: 8 }}
+        />
+        ${pwError ? html`<div style=${{ fontSize: 12, color: C.highText, marginBottom: 8 }}>パスワードが違います</div>` : null}
+        <button onClick=${handleLogin} style=${{ ...S.btn(false), width: '100%', justifyContent: 'center' }}>ログイン</button>
+      </div>
+    </div>
+  `;
+}
+
+function App() {
+  const [authed, setAuthed] = useState(() => localStorage.getItem('taskapp_authed') === '1');
+  if (!authed) return html`<${PasswordGate} onAuthed=${() => setAuthed(true)} />`;
+
+  return html`<${AppContent} />`;
+}
+
+function AppContent() {
+  const [tasks, setTasks] = useLocalStorage('taskapp_v4_tasks', []);
+  const [fixedTasks, setFixedTasks] = useLocalStorage('taskapp_v4_fixed', INITIAL_FIXED_TASKS);
+  const [properties, setProperties] = useLocalStorage('taskapp_v4_properties', INITIAL_PROPERTIES);
+  const [reflections, setReflections] = useLocalStorage('taskapp_v4_reflections', []);
+  const [activeView, setActiveView] = useState('today');
+  const [showBackup, setShowBackup] = useState(false);
+  const [showPropertyManage, setShowPropertyManage] = useState(false);
+  const [propertySidebarTarget, setPropertySidebarTarget] = useState(null);
+  const [toast, setToast] = useState(null);
+  const [deleteDropdownOpen, setDeleteDropdownOpen] = useState(false);
+  const [conflict, dismissConflict] = useTabConflict();
+  const [fixedEntryTarget, setFixedEntryTarget] = useState(null);
+
+  // タスク追加
+  const handleAddTask = useCallback((inputText, propertyId = null) => {
+    const lines = inputText.split('\n');
+    const mainLine = lines[0].trim();
+    if (!mainLine) return;
+    const subLines = lines.slice(1).map(l => l.trim()).filter(l => l.length > 0);
+    const priority = detectPriority(mainLine);
+    const displayText = makeDisplayText(mainLine);
+    const newTask = {
+      id: Date.now().toString(), text: mainLine, displayText, priority,
+      isComplete: false, completedAt: null, duration: '', memo: '',
+      createdAt: new Date().toISOString(),
+      propertyId: propertyId || null,
+      assignedTo: null, assignedBy: null,
+      subTasks: subLines.map((t, i) => ({ id: `${Date.now()}_sub${i}`, text: t, isComplete: false })),
+    };
+    setTasks(prev => [newTask, ...prev]);
+  }, []);
+
+  const handleCompleteTask = useCallback((taskId, duration, memo) => {
+    setTasks(prev => prev.map(t => t.id === taskId ? { ...t, isComplete: true, completedAt: new Date().toISOString(), duration, memo } : t));
+  }, []);
+
+  const handleUncompleteTask = useCallback((taskId) => {
+    setTasks(prev => prev.map(t => t.id === taskId ? { ...t, isComplete: false, completedAt: null, duration: '', memo: '' } : t));
+  }, []);
+
+  const handleDeleteTask = useCallback((taskId) => { setTasks(prev => prev.filter(t => t.id !== taskId)); }, []);
+
+  const handleEditTask = useCallback((taskId, newText, newSubTasks, propertyId) => {
+    const priority = detectPriority(newText);
+    const displayText = makeDisplayText(newText);
+    setTasks(prev => prev.map(t => t.id === taskId ? { ...t, text: newText, displayText, priority, subTasks: newSubTasks, propertyId: propertyId !== undefined ? propertyId : t.propertyId } : t));
+  }, []);
+
+  const handleToggleSub = useCallback((taskId, subId) => {
+    setTasks(prev => prev.map(t => t.id === taskId ? {
+      ...t,
+      subTasks: (t.subTasks || []).map(s => s.id === subId ? {
+        ...s, isComplete: !s.isComplete,
+        completedAt: !s.isComplete ? new Date().toISOString() : null
+      } : s)
+    } : t));
+  }, []);
+
+  const handleReorderProperties = useCallback((fromId, toId) => {
+    setProperties(prev => {
+      const arr = [...prev];
+      const fromIdx = arr.findIndex(p => p.id === fromId);
+      const toIdx = arr.findIndex(p => p.id === toId);
+      const [item] = arr.splice(fromIdx, 1);
+      arr.splice(toIdx, 0, item);
+      return arr;
+    });
+  }, []);
+
+  // 固定タスク
+  const handleAddFixedTask = useCallback((name) => {
+    setFixedTasks(prev => [...prev, { id: Date.now().toString(), name, entries: [] }]);
+  }, []);
+
+  const handleEditFixedTaskName = useCallback((id, name) => {
+    setFixedTasks(prev => prev.map(f => f.id === id ? { ...f, name } : f));
+  }, []);
+
+  const handleDeleteFixedTask = useCallback((id) => {
+    setFixedTasks(prev => prev.filter(f => f.id !== id));
+  }, []);
+
+  const handleAddFixedEntry = useCallback((fixedId, duration) => {
+    setFixedTasks(prev => prev.map(f => f.id === fixedId ? { ...f, entries: [...(f.entries || []), { duration, at: new Date().toISOString() }] } : f));
+  }, []);
+
+  const handleDeleteFixedEntry = useCallback((fixedId, date) => {
+    setFixedTasks(prev => prev.map(f => f.id === fixedId ? { ...f, entries: (f.entries || []).filter(e => toDateKey(e.at) !== date) } : f));
+  }, []);
+
+  // 物件
+  const handleAddProperty = useCallback((name) => {
+    setProperties(prev => [...prev, { id: Date.now().toString(), name, isHiddenFromToday: false, closedAt: null, createdAt: new Date().toISOString() }]);
+  }, []);
+
+  const handleEditProperty = useCallback((id, name) => {
+    setProperties(prev => prev.map(p => p.id === id ? { ...p, name } : p));
+  }, []);
+
+  const handleDeleteProperty = useCallback((id) => {
+    setProperties(prev => prev.filter(p => p.id !== id));
+  }, []);
+
+  const handleTogglePropertyHidden = useCallback((id) => {
+    setProperties(prev => prev.map(p => p.id === id ? { ...p, isHiddenFromToday: !p.isHiddenFromToday } : p));
+  }, []);
+
+  // 一括削除
+  const handleBulkDelete = useCallback((days) => {
+    const threshold = new Date();
+    threshold.setDate(threshold.getDate() - days);
+    let count = 0;
+    setTasks(prev => prev.filter(t => {
+      if (!t.isComplete || !t.completedAt) return true;
+      if (new Date(t.completedAt) < threshold) { count++; return false; }
+      return true;
+    }));
+    setTimeout(() => setToast(`${count}件削除しました`), 0);
+    setDeleteDropdownOpen(false);
+  }, [tasks]);
+
+  useEffect(() => {
+    if (!deleteDropdownOpen) return;
+    const handler = () => setDeleteDropdownOpen(false);
+    setTimeout(() => document.addEventListener('click', handler), 0);
+    return () => document.removeEventListener('click', handler);
+  }, [deleteDropdownOpen]);
+
+  return html`
+    <div style=${{ minHeight: '100vh', backgroundColor: C.bgPage }}>
+      <${Header}
+        view=${activeView} onNav=${setActiveView}
+        onBackup=${() => setShowBackup(true)}
+        onDeleteDropdown=${(e) => { e.stopPropagation(); setDeleteDropdownOpen(v => !v); }}
+        deleteDropdownOpen=${deleteDropdownOpen}
+        onBulkDelete=${handleBulkDelete}
+      />
+      <div style=${{ maxWidth: 640, margin: '0 auto', padding: '16px 12px' }}>
+        ${conflict ? html`<${ConflictBanner} onDismiss=${dismissConflict} />` : null}
+
+        ${activeView === 'today' ? html`
+          <${TodayView}
+            tasks=${tasks} fixedTasks=${fixedTasks} properties=${properties}
+            onAdd=${handleAddTask}
+            onComplete=${handleCompleteTask} onUncomplete=${handleUncompleteTask}
+            onDeleteTask=${handleDeleteTask} onEditTask=${handleEditTask} onToggleSub=${handleToggleSub}
+            onOpenEntry=${(f) => setFixedEntryTarget(f)}
+            onDeleteEntry=${handleDeleteFixedEntry}
+            onAddFixedTask=${handleAddFixedTask}
+            onEditFixedTaskName=${handleEditFixedTaskName}
+            onDeleteFixedTask=${handleDeleteFixedTask}
+            onTogglePropertyHidden=${handleTogglePropertyHidden}
+            onOpenPropertySidebar=${(p) => setPropertySidebarTarget(p)}
+            onOpenPropertyManage=${() => setShowPropertyManage(true)}
+            onReorderProperties=${handleReorderProperties}
+          />
+        ` : null}
+        ${activeView === 'daily' ? html`<${DailyReportView} tasks=${tasks} fixedTasks=${fixedTasks} properties=${properties} reflections=${reflections} onSaveReflection=${(r) => setReflections(prev => [...prev.filter(x => x.date !== r.date), r])} />` : null}
+        ${activeView === 'weekly' ? html`<${WeeklyReportView} tasks=${tasks} fixedTasks=${fixedTasks} reflections=${reflections} />` : null}
+        ${activeView === 'history' ? html`<${HistoryView} tasks=${tasks} properties=${properties} />` : null}
+      </div>
+
+      ${showBackup ? html`<${BackupModal} tasks=${tasks} fixedTasks=${fixedTasks} properties=${properties} setTasks=${setTasks} setFixedTasks=${setFixedTasks} setProperties=${setProperties} onClose=${() => setShowBackup(false)} />` : null}
+      ${showPropertyManage ? html`
+        <${PropertyManageModal}
+          properties=${properties}
+          onAdd=${handleAddProperty} onEdit=${handleEditProperty} onDelete=${handleDeleteProperty}
+          onClose=${() => setShowPropertyManage(false)}
+        />
+      ` : null}
+      ${propertySidebarTarget ? html`
+        <${PropertySidebar} property=${propertySidebarTarget} tasks=${tasks} onClose=${() => setPropertySidebarTarget(null)} />
+      ` : null}
+      ${fixedEntryTarget ? html`<${FixedEntryModal} fixedTask=${fixedEntryTarget} onAdd=${handleAddFixedEntry} onClose=${() => setFixedEntryTarget(null)} />` : null}
+      ${toast ? html`<${Toast} message=${toast} onDone=${() => setToast(null)} />` : null}
+    </div>
+  `;
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(html`<${App} />`);
+</script>
+</body>
+</html>
